@@ -123,4 +123,19 @@ Grafana
 
 ## 5. Problemas Encontrados
 
+### 5.1 Latência elevada em endpoints autenticadas
+
+**Causa raiz:** Latência de rede ao bando de dados remoto (Supabase) combinada com queries obrigatórias no filtro de segurança
+
+Através dos traces coletados no Jaeger, identificou-se que cada query ao PostgreSQL hospedado no Supabase leva em
+média ~155-163ms de latência de rede, independentemente da complexidade da consulta. O problema se agrava porque o
+SecurityFilter executa 2 queries em toda request autenticada antes de chegar no controller:
+
+1. SELECT ... FROM users WHERE email=? — para validar o token JWT (~161ms)
+2. SELECT ... FROM stats WHERE user_id=? — carregada automaticamente pelo JPA devido ao relacionamento @OneToOne com
+fetch EAGER na entidade User (~155ms)
+
+Isso significa que toda request autenticada já consome ~316ms apenas na autenticação, antes de executar qualquer
+lógica de negócio.
+
 ## 6. Melhorias Implementadas
