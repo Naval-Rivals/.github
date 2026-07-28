@@ -138,4 +138,45 @@ fetch EAGER na entidade User (~155ms)
 Isso significa que toda request autenticada já consome ~316ms apenas na autenticação, antes de executar qualquer
 lógica de negócio.
 
+### 5.2 Conexões invalidadas no pool (HikariCP)
+
+**Causa raiz:** O banco de dados remoto encerra conexões ociosas antes do tempo configurado no pool de conexões da aplicação.
+
+Nos logs da aplicação foram identificados warnings recorrentes do HikariCP:
+
+```
+HikariPool-1 - Failed to validate connection org.postgresql.jdbc.PgConnection@...
+  (This connection has been closed.). Possibly consider using a shorter maxLifetime value.
+```
+
+O HikariCP utiliza valores padrão de maxLifetime (30 minutos) e não possui keepalive-time configurado. O Supabase, no
+entanto, encerra conexões inativas em um intervalo menor. Isso faz com que o pool mantenha referências a conexões já fechadas
+pelo servidor, resultando em falhas de validação e necessidade de criar novas conexões sob demanda — adicionando latência
+extra às requisições.
+
+
+### 5.3 Timeout em conexões SSE do Lobby
+
+**Causa raiz:** O endpoint SSE (/lobby/events) não possuí configuração de timeout adequada, fazendo com que conexões ociosas sejam encerradas pelo Tomcat.
+
+Nos logs foram identificados erros de `AsyncRequestTimeoutException` seguidos de `HttpMediaTypeNotAcceptableException`.
+Isso ocorre porque, ao expirar a conexão SSE, o Spring tenta tratar a exceção pelo `GlobalExceptionHandler` que retorna
+*application/json* — incompatível com o content-type *text/event-stream* da conexão original. O resultado é um ciclo de
+exceções que gera logs de warn/error desnecessários.
+
+### 5.4 Serialização instável do PageImpl no endpoint de ranking
+
+**Causa raiz:** O endpoint de ranking retorna diretamente um PageImpl do Spring Data sem utilizar PagedModel, gerando umwarning sobre a instabilidade da estrutura JSON retornada entre versões do framework.
+
+### 5.4 Endpoints com latência elevada
+
+| Método | Endpoint | Tempo |
+---------|----------|-------|
+| POST | /rooms | 1s |
+| POST | /rooms/join | 1s |
+| GET | /games/{gameId}/result | 800ms |
+| DELETE | /rooms/{roomId} | 900ms |
+| PATCH | /users/me/nickname | 1s |
+| GET | /users/me/matches | 1.5s |
+
 ## 6. Melhorias Implementadas
