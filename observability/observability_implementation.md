@@ -177,13 +177,8 @@ exceções que gera logs de warn/error desnecessários.
 
 | Método | Endpoint | Tempo |
 ---------|----------|-------|
-| POST | /rooms | 1s |
-| POST | /rooms/join | 1s |
-| GET | /games/{gameId}/result | 800ms |
-| DELETE | /rooms/{roomId} | 900ms |
-| PATCH | /users/me/nickname | 1s |
+| PATCH | /users/me/nickname | 1.6s |
 | GET | /users/me/matches | 1.5s |
-| GET | /users/me | 999ms |
 
 ## 6. Melhorias Implementadas
 
@@ -346,44 +341,43 @@ CREATE INDEX idx_game_results_finished_at
 
 ### 6.6 Otimização da latência do endpoint PATCH /users/me/nickname
 
-FALTA IMPLEMENTAR
+**Problema relacionado:** [5.5](#55-endpoints-com-latência-elevada)
 
- Problema relacionado: 5.5 (#55-endpoints-com-latência-elevada)
+A análise do trace no Jaeger revelou que o endpoint PATCH /users/me/nickname consumia ~1.6s para uma operação trivial
+de atualização. O fluxo executava 4 queries sequenciais ao banco remoto (~200ms cada devido à latência de rede com o
+Supabase):
 
-  A análise do trace no Jaeger revelou que o endpoint PATCH /users/me/nickname consumia ~1.6s para uma operação trivial
-  de atualização. O fluxo executava 4 queries sequenciais ao banco remoto (~200ms cada devido à latência de rede com o
-  Supabase):
+1. SELECT ... FROM users WHERE email=? — SecurityFilter (autenticação JWT) — inevitável
+2. SELECT ... FROM users WHERE nickname=? LIMIT 1 — verificação de unicidade via existsByNickname
+3. SELECT ... FROM users WHERE id=? — reload do usuário via findById para obter entidade gerenciada
+4. SELECT ... FROM stats WHERE user_id=? — carregamento do Stats ao construir o UserResponse
+5. UPDATE users SET email=?, nickname=?, password=? WHERE id=? — dirty checking do Hibernate (full entity update)
 
-  1. SELECT ... FROM users WHERE email=? — SecurityFilter (autenticação JWT) — inevitável
-  2. SELECT ... FROM users WHERE nickname=? LIMIT 1 — verificação de unicidade via existsByNickname
-  3. SELECT ... FROM users WHERE id=? — reload do usuário via findById para obter entidade gerenciada
-  4. SELECT ... FROM stats WHERE user_id=? — carregamento do Stats ao construir o UserResponse
-  5. UPDATE users SET email=?, nickname=?, password=? WHERE id=? — dirty checking do Hibernate (full entity update)
+**Solução:**
 
-  As queries #3 e #4 são desnecessárias: o findById pode ser substituído por getReferenceById (que retorna um proxy sem
-  query), e o carregamento de Stats ocorre apenas porque o UserResponse inclui StatsResponse — informação irrelevante
-  para a resposta de alteração de nickname.
+- Substituição de findById por getReferenceById para obter a entidade gerenciada sem executar SELECT adicional, já que
+apenas o nickname precisa ser atualizado e o ID é conhecido.
+- Utilização de @Modifying @Query com update direto via JPQL, eliminando o padrão read-modify-write do Hibernate e
+evitando o carregamento completo da entidade.
+- Criação de um DTO de resposta enxuto (NicknameResponse) que retorna apenas o nickname atualizado, sem necessidade de
+carregar Stats.
 
-  Solução:
-
-  - Substituição de findById por getReferenceById para obter a entidade gerenciada sem executar SELECT adicional, já que
-  apenas o nickname precisa ser atualizado e o ID é conhecido.
-  - Utilização de @Modifying @Query com update direto via JPQL, eliminando o padrão read-modify-write do Hibernate e
-  evitando o carregamento completo da entidade.
-  - Criação de um DTO de resposta enxuto (NicknameResponse) que retorna apenas o nickname atualizado, sem necessidade de
-  carregar Stats.
-
-  // UserRepository.java — novo método com update direto
+```java
+// UserRepository.java — novo método com update direto
   @Modifying
   @Query("UPDATE User u SET u.nickname = :nickname WHERE u.id = :id")
   void updateNickname(@Param("id") UUID id, @Param("nickname") String nickname);
-
-  // NicknameResponse.java
+```
+  
+```java
+// NicknameResponse.java
   public record NicknameResponse(
           String nickname
   ) {}
+```
 
-  // UserService.java — método otimizado
+```java
+// UserService.java — método otimizado
   @Transactional
   public NicknameResponse changeNickname(UpdateNicknameRequest data, User user) {
 
@@ -398,7 +392,9 @@ FALTA IMPLEMENTAR
   data.nickname());
       return new NicknameResponse(data.nickname());
   }
+```
 
+```java
   // UserController.java — retorno com DTO enxuto
   @PatchMapping("/me/nickname")
   public ResponseEntity<NicknameResponse> changeNickname(
@@ -408,8 +404,5 @@ FALTA IMPLEMENTAR
       var response = userService.changeNickname(requestBody, user);
       return ResponseEntity.ok(response);
   }
+```
 
-  Com essa otimização, o endpoint elimina 2 queries (SELECT por ID + SELECT stats) e o full entity update, reduzindo de
-  5 operações ao banco para 2 (verificação de unicidade + UPDATE direto). O tempo esperado do endpoint cai de ~1.6s para
-  ~500ms (considerando a latência de rede com o Supabase: ~160ms por query no SecurityFilter + ~160ms existsByNickname +
-  ~160ms UPDATE).
