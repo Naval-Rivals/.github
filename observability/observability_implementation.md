@@ -406,3 +406,108 @@ carregar Stats.
   }
 ```
 
+### 6.7 Implementação de Redis como armazenamento de estado de partida
+
+Anteriormente, o estado das partidas em andamento (tabuleiros, navios, tiros, turno atual, habilidades) era mantido
+exclusivamente em memória na JVM, utilizando estruturas internas da aplicação. Isso significava que qualquer reinício
+do servidor — deploy, crash ou scale-out — resultava na perda imediata de todas as partidas em andamento, sem
+possibilidade de recuperação.
+
+Além disso, a abordagem in-memory impedia a escalabilidade horizontal, pois cada instância possuía seu próprio estado
+isolado de jogo.
+
+**Solução:** Substituição do armazenamento **in-memory** por `Redis`, utilizando StringRedisTemplate do Spring Data Redis
+para persistir o estado completo de cada partida como JSON serializado, com TTL automático de 25 minutos.
+
+```java
+// RedisConfig.java
+@Configuration
+  public class RedisConfig {
+
+      @Bean
+      public RedisCacheManager cacheManager(RedisConnectionFactory connectionFactory){
+          RedisCacheConfiguration config = RedisCacheConfiguration.defaultCacheConfig()
+                  .entryTtl(Duration.ofMinutes(10))
+                  .disableCachingNullValues()
+                  .serializeKeysWith(RedisSerializationContext.SerializationPair
+                          .fromSerializer(new StringRedisSerializer()))
+                  .serializeValuesWith(RedisSerializationContext.SerializationPair
+                          .fromSerializer(GenericJacksonJsonRedisSerializer.builder().build()));
+
+          return RedisCacheManager
+                  .builder(connectionFactory)
+                  .cacheDefaults(config)
+                  .build();
+      }
+  }
+```
+
+```java
+// GameStorage.java
+@Slf4j
+  @Component
+  public class GameStorage {
+
+      private static final String KEY_PREFIX = "game:";
+      private static final Duration GAME_TTL = Duration.ofMinutes(25);
+
+      private final StringRedisTemplate redisTemplate;
+      private final ObjectMapper objectMapper;
+
+      public GameStorage(StringRedisTemplate redisTemplate) {
+          this.redisTemplate = redisTemplate;
+          this.objectMapper = new ObjectMapper();
+          this.objectMapper.registerModule(new JavaTimeModule());
+          this.objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+          this.objectMapper.setVisibility(PropertyAccessor.FIELD, JsonAutoDetect.Visibility.ANY);
+      }
+
+      public void save(Game game) {
+          String json = objectMapper.writeValueAsString(game);
+          redisTemplate.opsForValue().set(KEY_PREFIX + game.getId(), json, GAME_TTL);
+      }
+
+      public Optional<Game> findById(UUID gameId) {
+          String json = redisTemplate.opsForValue().get(KEY_PREFIX + gameId);
+          if (json == null) return Optional.empty();
+          return Optional.of(objectMapper.readValue(json, Game.class));
+      }
+
+      public void remove(UUID gameId) {
+          redisTemplate.delete(KEY_PREFIX + gameId);
+      }
+
+      public int removeIf(Predicate<Game> condition) {
+          int count = 0;
+          var scanOptions = ScanOptions.scanOptions().match(KEY_PREFIX + "*").count(100).build();
+
+          try (var cursor = redisTemplate.scan(scanOptions)) {
+              while (cursor.hasNext()) {
+                  String key = cursor.next();
+                  String json = redisTemplate.opsForValue().get(key);
+                  if (json == null) continue;
+                  Game game = objectMapper.readValue(json, Game.class);
+                  if (condition.test(game)) {
+                      redisTemplate.delete(key);
+                      count++;
+                  }
+              }
+          }
+          return count;
+      }
+  }
+```
+
+```yml
+# application.yaml
+spring:
+    cache:
+      type: redis
+    data:
+      redis:
+        host: ${REDIS_HOST}
+        port: ${REDIS_PORT}
+        password: ${REDIS_PASSWORD}
+        ssl:
+          enabled: true
+```
