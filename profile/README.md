@@ -12,19 +12,19 @@ Nosso propósito é tornar a estratégia naval acessível e competitiva para tod
 
 ## A Plataforma
 
-### ⚔️ Batalhas em Tempo Real
+### Batalhas em Tempo Real
 
 Ataques alternados com tempo limitado por jogada. Cada segundo conta na hora de decidir seu próximo tiro.
 
-### 🚢 Frotas Personalizáveis
+### Frotas Personalizáveis
 
 Posicione seus 5 navios como quiser no tabuleiro 10x10. Sua disposição, sua estratégia.
 
-### 🏆 Sistema de Ranking
+### Sistema de Ranking
 
 Suba de posição a cada vitória e dispute o topo da tabela contra outros capitães.
 
-### 🎯 Salas Públicas e Convites
+### Salas Públicas e Convites
 
 Gere um código para desafiar um amigo específico ou entre em uma batalha aleatória contra qualquer oponente no lobby.
 
